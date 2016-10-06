@@ -1,179 +1,344 @@
-#region Copyright MIT License
-/*
- * Copyright © 2016 Sergey Shevelev, François St-Arnaud and John Wood
- * 
- * Permission is hereby granted, free of charge, to any person
- * obtaining a copy of this software and associated documentation
- * files (the "Software"), to deal in the Software without
- * restriction, including without limitation the rights to use,
- * copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following
- * conditions:
- * 
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- * 
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
- * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
- * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
- * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- * OTHER DEALINGS IN THE SOFTWARE.
- *
- * Based on work by François St-Arnaud (http://codeproject.com/SolGen)
- */
-#endregion
-
+using Microsoft.Build.Evaluation;
 using System;
 using System.Collections.Generic;
-using System.Configuration;
-using System.Diagnostics;
 using System.IO;
-using System.Text.RegularExpressions;
+using System.Linq;
+using System.Text;
 
 namespace SolGen
 {
-    /// <summary>
-    /// A utility for fixing project references and generating solution files.
-    /// </summary>
-    internal class SolGenMain
+    public class SolutionMaker
     {
-        private const string GeneratedSolutionFileNameSuffixConfigPropertyName = "GeneratedSolutionFileNameSuffix";
-        private const string BuildConfigurationsConfigPropertyName = "BuildConfigurations";
+        private readonly string [] _buildConfigurations;
+        private const string CsProjFileExtension = ".csproj";
+        private const string VcxProjFileExtension = ".vcxproj";
+        private const string FsProjFileExtension = ".fsproj";
 
-        private readonly Dictionary<string, string> _args;
+        private const string ProjectGuidPropertyName = "ProjectGuid";
+        private const string ProjectReferencePropertyName = "ProjectReference";
+        private const string ProjectFilePropertyName = "ProjectFile";
 
-        public static void Main(string[] args)
+        private const string CsProjGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}";
+        private const string FolderGuid = "{2150E333-8FDC-42A3-9474-1A3956D46DE8}";
+        private const string VcxProjGuid = "{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}";
+        private const string FsProjGuid = "{F2A71F9B-5D33-465A-A702-920D77279786}";
+
+        private readonly string _rootFolder;
+        private readonly string _solutionFileName;
+        private readonly Dictionary<string, ProjectInfo> _solutionProjects;
+        private string _commonRoot;
+
+        public SolutionMaker(string solutionFilePath, string [] buildConfigurations)
         {
-            SolGenMain program = new SolGenMain(args);
-            program.Run();
+            if (buildConfigurations == null || buildConfigurations.Length == 0)
+            {
+                buildConfigurations = new [] { "Any CPU" };
+            }
+
+            _buildConfigurations = buildConfigurations;
+            _rootFolder = Path.GetDirectoryName(solutionFilePath);
+            _solutionFileName = Path.GetFileName(solutionFilePath);
+            _solutionProjects = new Dictionary<string, ProjectInfo>(StringComparer.CurrentCultureIgnoreCase);
+            _commonRoot = _rootFolder;
         }
 
-        private SolGenMain(string[] args)
+        public void AddProject(string path)
         {
-            _args = ParseArgs(args);
+            ProcessProjectFile(path);
         }
 
-        private void Run()
+        public void CreateSolution()
         {
-            string buildConfigurationsString = GetArg("configs", ConfigurationManager.AppSettings[BuildConfigurationsConfigPropertyName] ?? string.Empty);
-            string [] buildConfigurations = buildConfigurationsString.Split(new [] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            WriteSolutionFile(Path.Combine(_rootFolder, _solutionFileName));
+        }
+
+        private void ProcessProjectFile(string path)
+        {
+            if (_solutionProjects.ContainsKey(path))
+                return;
 
             try
             {
-                SolutionMaker maker;
-                string solutionPath;
+                ProjectCollection collection = new ProjectCollection();
 
-                if (GetArg("h", string.Empty) != string.Empty)
+                Dictionary<string, string> properties = new Dictionary<string, string>();
+                Project project = new Project(path, properties, null, collection,
+                                              ProjectLoadSettings.IgnoreMissingImports);
+                ProjectInfo pinfo = new ProjectInfo
                 {
-                    Console.WriteLine("Usage: solgen [/configs:<comma separated list of build configurations to generate>] [project file]\n");
-                    Console.WriteLine("Examples:");
-                    Console.WriteLine("          solgen");
-                    Console.WriteLine("                 will search for all project files recursively from current directory and add them and dependencies to the generated solution");
-                    Console.WriteLine("          solgen myproject.csproj");
-                    Console.WriteLine("                 will add myproject.csproj and dependencies to the generated solution");
-                    Console.WriteLine("          solgen myproject.proj");
-                    Console.WriteLine("                 will add myproject.proj and dependencies to the generated solution");
-                    Console.WriteLine("          solgen /configx:x64 myproject.csproj");
-                    Console.WriteLine("                 will add myproject.csproj and dependencies to the generated solution with build configuration x64");
-                    Console.WriteLine("          solgen /configx:x64,x86 myproject.csproj");
-                    Console.WriteLine("                 will add myproject.csproj and dependencies to the generated solution with build configurations x64 and x86");
-                    return;
-                }
+                    MsBuildProject = project,
+                    FilePath = Path.GetDirectoryName(path),
+                    Filename = Path.GetFileName(path)
+                };
 
-                if (GetArg("", string.Empty) != string.Empty)
+                foreach (ProjectProperty buildProperty in project.Properties)
                 {
-                    string filepath = Path.GetFullPath(GetArg("", string.Empty));
-                    solutionPath = GetSolutionFileName(Path.GetDirectoryName(filepath), Path.GetFileNameWithoutExtension(filepath));
-                    maker = new SolutionMaker(solutionPath, buildConfigurations);
-                    maker.AddProject(filepath);
-                }
-                else
-                {
-                    string [] projectFiles = Directory.GetFiles(".", "*.*proj", SearchOption.AllDirectories);
-                    if (projectFiles.Length == 0)
+                    if (buildProperty.Name == ProjectGuidPropertyName)
                     {
-                        throw new InvalidOperationException("No project files found");
-                    }
-
-                    if (projectFiles.Length == 1)
-                    {
-                        string filePath = Path.GetFullPath(projectFiles[0]);
-                        solutionPath = GetSolutionFileName(Path.GetDirectoryName(filePath), Path.GetFileNameWithoutExtension(filePath));
-                    }
-                    else
-                    {
-                        string fileName = Path.GetFileName(Environment.CurrentDirectory);
-                        solutionPath = GetSolutionFileName(Environment.CurrentDirectory, fileName);
-                    }
-
-                    maker = new SolutionMaker(solutionPath, buildConfigurations);
-                    foreach (string projectFile in projectFiles)
-                    {
-                        maker.AddProject(Path.GetFullPath(projectFile));
+                        pinfo.ProjectGuid = buildProperty.EvaluatedValue;
                     }
                 }
 
-                maker.CreateSolution();
+                _solutionProjects[path] = pinfo;
 
-                Process.Start(solutionPath);
+                CreatePath(pinfo);
+
+                GatherProjectReferences(pinfo);
+                Console.WriteLine(pinfo);
             }
             catch (Exception e)
             {
-                Console.WriteLine();
-                Console.WriteLine("A problem occurred running SolGen and the generation did not complete.");
-                Console.WriteLine("Exception: " + e.Message + " (" + e.GetType().Name + ")");
-                Console.WriteLine(e.StackTrace);
+                Console.Error.WriteLine(e);
             }
         }
 
-        private static string GetSolutionFileName(string directory, string filename)
+        /// <summary>
+        /// Retrieves the information on references in the project
+        /// </summary>
+        private void GatherProjectReferences(ProjectInfo projectInfo)
         {
-            string fileNameSuffix = ConfigurationManager.AppSettings[GeneratedSolutionFileNameSuffixConfigPropertyName] ?? string.Empty;
-            
-            return Path.Combine(directory, filename + fileNameSuffix + ".sln");
-        }
-
-        private T GetArg<T>(string argName, T defaultValue)
-        {
-            string stringValue;
-
-            if (_args.TryGetValue(argName, out stringValue))
+            foreach (ProjectItem buildItem in projectInfo.MsBuildProject.Items)
             {
-                return (T)Convert.ChangeType(stringValue, typeof(T));
-            }
-
-            return defaultValue;
-        }
-
-        private T GetArg<T>(string argName)
-        {
-            return (T)Convert.ChangeType(_args[argName], typeof(T));
-        }
-
-        private static Dictionary<string, string> ParseArgs(string[] args)
-        {
-            var ret = new Dictionary<string, string>();
-
-            foreach (string arg in args)
-            {
-                Match m = Regex.Match(arg, "^/(?<name>[a-zA-Z_0-9]+)(:(?<value>.*))?$");
-
-                if (m.Success)
+                if (buildItem.ItemType == ProjectReferencePropertyName || buildItem.ItemType == ProjectFilePropertyName)
                 {
-                    string value = m.Groups["value"].Success ? m.Groups["value"].Value : "true";
-                    ret[m.Groups["name"].Value.ToLower()] = value;
+                    projectInfo.References.Add(buildItem.EvaluatedInclude);
+                    ProcessProjectFile(Path.GetFullPath(Path.Combine(projectInfo.FilePath, buildItem.EvaluatedInclude)));
+                }
+            }
+        }
+
+        private void CreatePath(ProjectInfo projectInfo)
+        {
+            string projectFolderPath = !projectInfo.IsFolder ? 
+                Path.GetDirectoryName(projectInfo.FilePath) :
+                projectInfo.FilePath;
+
+            if (projectFolderPath == null)
+                return;
+
+            if (!_solutionProjects.ContainsKey(projectFolderPath))
+            {
+                var folder = new ProjectInfo
+                {
+                    Filename = Path.GetFileName(projectFolderPath),
+                    FilePath = Path.GetDirectoryName(projectFolderPath),
+                    IsFolder = true
+                };
+                if (string.IsNullOrEmpty(folder.Filename))
+                    return;
+
+                if (_commonRoot.StartsWith(projectFolderPath, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    _commonRoot = projectFolderPath;
+                }
+                else if (!projectFolderPath.StartsWith(_commonRoot, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    _commonRoot = string.Empty;
+                }
+
+                _solutionProjects.Add(projectFolderPath, folder);
+
+                projectInfo.FolderGuid = folder.ProjectGuid;
+                CreatePath(folder);
+            }
+            else
+            {
+                projectInfo.FolderGuid = _solutionProjects[projectFolderPath].ProjectGuid;
+            }
+        }
+
+        private void WriteSolutionFile(string solutionFile)
+        {
+            StreamWriter writer = new StreamWriter(solutionFile);
+
+            writer.WriteLine("Microsoft Visual Studio Solution File, Format Version 11.00");
+            writer.WriteLine("# Visual Studio 2010");
+
+            foreach (ProjectInfo projectInfo in _solutionProjects.Values)
+            {
+                var projectInfoCopy = projectInfo.ShallowCopy();
+                if (!projectInfoCopy.IsFolder || 
+                    string.Compare(Path.Combine(projectInfoCopy.FilePath, projectInfoCopy.Filename), _commonRoot, StringComparison.InvariantCultureIgnoreCase) != 0)
+                {
+                    WriteProjectEntry(writer, projectInfoCopy, Path.GetDirectoryName(solutionFile));
+                }
+            }
+
+            // Project and folder relations
+            writer.WriteLine("Global");
+            writer.WriteLine("\tGlobalSection(NestedProjects) = preSolution");
+            const string format = "\t\t{0} = {1}";
+
+            // Folder relations
+            foreach (ProjectInfo folderInfo in _solutionProjects.Values)
+            {
+                if (folderInfo.ProjectGuid != null && folderInfo.FolderGuid != null && folderInfo.FilePath != _commonRoot)
+                {
+                    writer.WriteLine(format, folderInfo.ProjectGuid, folderInfo.FolderGuid);
+                }
+            }
+
+            writer.WriteLine("\tEndGlobalSection");
+            writer.WriteLine("\tGlobalSection(SolutionConfigurationPlatforms) = preSolution");
+            string [] buildModes = { "Debug", "Release" };
+            foreach(var buildMode in buildModes)
+            {
+                foreach (var buildConfig in _buildConfigurations)
+                {
+                    writer.WriteLine("\t\t{0}|{1} = {0}|{1}", buildMode, buildConfig);
+                }
+            }
+
+            writer.WriteLine("\tEndGlobalSection");
+            writer.WriteLine("\tGlobalSection(ProjectConfigurationPlatforms) = postSolution");
+            foreach (ProjectInfo projectInfo in _solutionProjects.Values.Where(prj => !prj.IsFolder))
+            {
+                foreach (var buildMode in buildModes)
+                {
+                    foreach (var buildConfig in _buildConfigurations)
+                    {
+                        writer.WriteLine("\t\t{0}.{1}|{2}.ActiveCfg = {1}|{2}", projectInfo.ProjectGuid, buildMode, buildConfig);
+                        writer.WriteLine("\t\t{0}.{1}|{2}.Build.0 = {1}|{2}", projectInfo.ProjectGuid, buildMode, buildConfig);
+                    }
+                }
+            }
+            writer.WriteLine("\tEndGlobalSection");
+
+            writer.WriteLine("EndGlobal");
+            writer.Close();
+        }
+
+        private static string LookupGuid(string extension)
+        {
+            switch (extension.ToLower())
+            {
+                case CsProjFileExtension:
+                    return CsProjGuid;
+                case VcxProjFileExtension:
+                    return VcxProjGuid;
+                case FsProjFileExtension:
+                    return FsProjGuid;
+                default:
+                    return null;
+            }
+        }
+
+        private static void WriteProjectEntry(TextWriter writer, ProjectInfo projectInfo, string rootFolder)
+        {
+            string projectPath;
+            string guid;
+
+            if (projectInfo.IsFolder == false)
+            {
+                // TODO
+                if (projectInfo.FilePath.StartsWith(rootFolder, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    projectPath = Path.Combine(projectInfo.FilePath, projectInfo.Filename).Substring(rootFolder.Length + 1);
                 }
                 else
                 {
-                    ret[""] = arg;
+                    projectPath = GetRelativePath(rootFolder, Path.Combine(projectInfo.FilePath, projectInfo.Filename));
+                }
+                guid = LookupGuid(Path.GetExtension(projectInfo.Filename));
+            }
+            else
+            {
+                projectPath = projectInfo.ProjectGuid;
+                guid = FolderGuid;
+            }
+
+            if (guid != null)
+            {
+                string format = "Project('{0}') = '{1}', '{2}', '{3}'".Replace('\'', '"');
+                writer.WriteLine(format, guid, projectInfo.Filename, projectPath, projectInfo.ProjectGuid);
+                writer.WriteLine("EndProject");
+            }
+        }
+
+        private static string GetRelativePath(string fromPath, string toPath)
+        {
+            string[] fromDirectories = fromPath.Split(Path.DirectorySeparatorChar);
+            string[] toDirectories = toPath.Split(Path.DirectorySeparatorChar);
+
+            // Get the shortest of the two paths
+            int length = fromDirectories.Length < toDirectories.Length
+                             ? fromDirectories.Length
+                             : toDirectories.Length;
+
+            int lastCommonRoot = -1;
+            int index;
+
+            // Find common root
+            for (index = 0; index < length; index++)
+            {
+                if (fromDirectories[index].Equals(toDirectories[index], StringComparison.InvariantCultureIgnoreCase))
+                {
+                    lastCommonRoot = index;
+                }
+                else
+                {
+                    break;
                 }
             }
 
-            return ret;
+            // If we didn't find a common prefix then abandon
+            if (lastCommonRoot == -1)
+            {
+                return null;
+            }
+
+            // Add the required number of "..\" to move up to common root level
+            StringBuilder relativePath = new StringBuilder();
+            for (index = lastCommonRoot + 1; index < fromDirectories.Length; index++)
+            {
+                relativePath.Append(".." + Path.DirectorySeparatorChar);
+            }
+
+            // Add on the folders to reach the destination
+            for (index = lastCommonRoot + 1; index < toDirectories.Length - 1; index++)
+            {
+                relativePath.Append(toDirectories[index] + Path.DirectorySeparatorChar);
+            }
+            relativePath.Append(toDirectories[toDirectories.Length - 1]);
+
+            return relativePath.ToString();
+        }
+
+        /// <summary>
+        /// Represents a project reference or loaded project.
+        /// </summary>
+        private class ProjectInfo
+        {
+            public ProjectInfo()
+            {
+                ProjectGuid = Guid.NewGuid().ToString("B");
+                IsFolder = false;
+            }
+
+            public string ProjectGuid = null;
+            public string Filename = null;
+            public string FilePath { get; set; }
+            public string FolderGuid = null;
+            public bool IsFolder { get; set; }
+
+            // list of assemblynames
+            public readonly List<string> References = new List<string>();
+
+            public Project MsBuildProject;
+
+            public ProjectInfo ShallowCopy()
+            {
+                return (ProjectInfo)this.MemberwiseClone();
+            }
+
+            public override string ToString()
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendFormat("'{0}', ", Filename);
+                sb.AppendFormat("'{0}', ", FilePath);
+
+                return sb.ToString();
+            }
         }
     }
 }
