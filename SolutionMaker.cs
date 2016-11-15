@@ -1,4 +1,4 @@
-﻿using Microsoft.Build.Evaluation;
+using Microsoft.Build.Evaluation;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -9,11 +9,13 @@ namespace SolGen
 {
     public class SolutionMaker
     {
+        private readonly string [] _buildConfigurations;
         private const string CsProjFileExtension = ".csproj";
         private const string VcxProjFileExtension = ".vcxproj";
         private const string FsProjFileExtension = ".fsproj";
 
         private const string ProjectGuidPropertyName = "ProjectGuid";
+        private const string PlatformPropertyName = "Platform";
         private const string ProjectReferencePropertyName = "ProjectReference";
         private const string ProjectFilePropertyName = "ProjectFile";
 
@@ -27,8 +29,14 @@ namespace SolGen
         private readonly Dictionary<string, ProjectInfo> _solutionProjects;
         private string _commonRoot;
 
-        public SolutionMaker(string solutionFilePath)
+        public SolutionMaker(string solutionFilePath, string [] buildConfigurations)
         {
+            if (buildConfigurations == null || buildConfigurations.Length == 0)
+            {
+                buildConfigurations = new [] { "Any CPU" };
+            }
+
+            _buildConfigurations = buildConfigurations;
             _rootFolder = Path.GetDirectoryName(solutionFilePath);
             _solutionFileName = Path.GetFileName(solutionFilePath);
             _solutionProjects = new Dictionary<string, ProjectInfo>(StringComparer.CurrentCultureIgnoreCase);
@@ -53,10 +61,9 @@ namespace SolGen
             try
             {
                 ProjectCollection collection = new ProjectCollection();
-
+                collection.RemoveGlobalProperty("Platform");
                 Dictionary<string, string> properties = new Dictionary<string, string>();
-                Project project = new Project(path, properties, null, collection,
-                                              ProjectLoadSettings.IgnoreMissingImports);
+                Project project = new Project(path, properties, null, collection, ProjectLoadSettings.IgnoreMissingImports);
                 ProjectInfo pinfo = new ProjectInfo
                 {
                     MsBuildProject = project,
@@ -69,6 +76,11 @@ namespace SolGen
                     if (buildProperty.Name == ProjectGuidPropertyName)
                     {
                         pinfo.ProjectGuid = buildProperty.EvaluatedValue;
+                    }
+
+                    if (buildProperty.Name == PlatformPropertyName)
+                    {
+                        pinfo.Platform = buildProperty.EvaluatedValue;
                     }
                 }
 
@@ -117,6 +129,7 @@ namespace SolGen
                     FilePath = Path.GetDirectoryName(projectFolderPath),
                     IsFolder = true
                 };
+
                 if (string.IsNullOrEmpty(folder.Filename))
                     return;
 
@@ -124,6 +137,7 @@ namespace SolGen
                 {
                     _commonRoot = projectFolderPath;
                 }
+
                 else if (!projectFolderPath.StartsWith(_commonRoot, StringComparison.CurrentCultureIgnoreCase))
                 {
                     _commonRoot = string.Empty;
@@ -173,14 +187,10 @@ namespace SolGen
 
             writer.WriteLine("\tEndGlobalSection");
             writer.WriteLine("\tGlobalSection(SolutionConfigurationPlatforms) = preSolution");
-            string [] buildConfigs =
-            {
-                "Any CPU", 
-            };
             string [] buildModes = { "Debug", "Release" };
             foreach(var buildMode in buildModes)
             {
-                foreach (var buildConfig in buildConfigs)
+                foreach (var buildConfig in _buildConfigurations)
                 {
                     writer.WriteLine("\t\t{0}|{1} = {0}|{1}", buildMode, buildConfig);
                 }
@@ -192,10 +202,16 @@ namespace SolGen
             {
                 foreach (var buildMode in buildModes)
                 {
-                    foreach (var buildConfig in buildConfigs)
+                    foreach (var buildConfig in _buildConfigurations)
                     {
-                        writer.WriteLine("\t\t{0}.{1}|{2}.ActiveCfg = {1}|{2}", projectInfo.ProjectGuid, buildMode, buildConfig);
-                        writer.WriteLine("\t\t{0}.{1}|{2}.Build.0 = {1}|{2}", projectInfo.ProjectGuid, buildMode, buildConfig);
+                        string bc = buildConfig != "Mixed Platforms" ? buildConfig : projectInfo.Platform;
+                        if (bc == "AnyCPU")
+                        {
+                            bc = "Any CPU";
+                        }
+
+                        writer.WriteLine("\t\t{0}.{1}|{2}.ActiveCfg = {3}|{4}", projectInfo.ProjectGuid, buildMode, buildConfig, buildMode, bc);
+                        writer.WriteLine("\t\t{0}.{1}|{2}.Build.0 = {3}|{4}", projectInfo.ProjectGuid, buildMode, buildConfig, buildMode, bc);
                     }
                 }
             }
@@ -227,8 +243,8 @@ namespace SolGen
 
             if (projectInfo.IsFolder == false)
             {
-                // TODO
-                if (projectInfo.FilePath.StartsWith(rootFolder, StringComparison.InvariantCultureIgnoreCase))
+                string projectDir = Path.GetDirectoryName(projectInfo.FilePath) ?? string.Empty;
+                if (projectDir.StartsWith(rootFolder, StringComparison.InvariantCultureIgnoreCase))
                 {
                     projectPath = Path.Combine(projectInfo.FilePath, projectInfo.Filename).Substring(rootFolder.Length + 1);
                 }
@@ -236,6 +252,7 @@ namespace SolGen
                 {
                     projectPath = GetRelativePath(rootFolder, Path.Combine(projectInfo.FilePath, projectInfo.Filename));
                 }
+
                 guid = LookupGuid(Path.GetExtension(projectInfo.Filename));
             }
             else
@@ -296,6 +313,7 @@ namespace SolGen
             {
                 relativePath.Append(toDirectories[index] + Path.DirectorySeparatorChar);
             }
+
             relativePath.Append(toDirectories[toDirectories.Length - 1]);
 
             return relativePath.ToString();
@@ -317,6 +335,7 @@ namespace SolGen
             public string FilePath { get; set; }
             public string FolderGuid = null;
             public bool IsFolder { get; set; }
+            public string Platform { get; set; }
 
             // list of assemblynames
             public readonly List<string> References = new List<string>();
