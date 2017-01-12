@@ -11,6 +11,7 @@ namespace SolGen
     {
         private readonly string [] _buildConfigurations;
         private const string CsProjFileExtension = ".csproj";
+        private const string WixProjFileExtension = ".wixproj";
         private const string VcxProjFileExtension = ".vcxproj";
         private const string FsProjFileExtension = ".fsproj";
 
@@ -20,6 +21,7 @@ namespace SolGen
         private const string ProjectFilePropertyName = "ProjectFile";
 
         private const string CsProjGuid = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}";
+        private const string WixProjGuid = "{930C7802-8A8C-48F9-8165-68863BCCD9DD}";
         private const string FolderGuid = "{2150E333-8FDC-42A3-9474-1A3956D46DE8}";
         private const string VcxProjGuid = "{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}";
         private const string FsProjGuid = "{F2A71F9B-5D33-465A-A702-920D77279786}";
@@ -227,6 +229,8 @@ namespace SolGen
             {
                 case CsProjFileExtension:
                     return CsProjGuid;
+                case WixProjFileExtension:
+                    return WixProjGuid;
                 case VcxProjFileExtension:
                     return VcxProjGuid;
                 case FsProjFileExtension:
