@@ -1,5 +1,5 @@
 Command line tool that generates visual studio solution file from a set of projects. 
-Generated solution file includes all the projects and their dependencies with directory structure recreated withing the solution.
+Generated solution file includes all the projects and their dependencies with directory structure recreated within the solution.
 Useful for complex repositories consisting of many projects files.
 
 A few examples:
